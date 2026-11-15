@@ -6,8 +6,14 @@
 #   * apt packages pulled in by the APTK dependency installer (menu 2)
 #   * the morrownr/8814au out-of-tree DKMS driver, if it was built
 #   * a bettercap binary dropped into /usr/local/bin (GitHub fallback path)
+#   * a Kismet built from SOURCE by APTK (unsupported-release path in v1.3:
+#     /usr/local/src/kismet, /usr/local/bin/kismet*, ...), plus the
+#     kismetwireless.net apt repo file and signing key added by APTK
 #   * APTK config, pid dir, and its NetworkManager / gpsd / Kismet edits
 #   * ALL capture logs: /var/log/aptk and the legacy /var/log/wardrive
+#
+# v1.3: added Kismet source-build + apt-repo cleanup (companion to
+#       AccessPointToolKit.sh v1.3)
 #
 # Usage:
 #   sudo ./AccessPointToolKit-uninstall.sh [options]
@@ -198,6 +204,20 @@ rmpath /etc/default/gpsd.wardrive.bak
 # bettercap installed from the GitHub-release fallback (not owned by apt)
 if [[ -x /usr/local/bin/bettercap ]] && ! dpkg -S /usr/local/bin/bettercap >/dev/null 2>&1; then
   rmpath /usr/local/bin/bettercap
+fi
+# Kismet apt repo + signing key added by APTK v1.3 (signed-by keyring method)
+rmpath /etc/apt/sources.list.d/kismet.list
+rmpath /etc/apt/keyrings/kismet-archive-keyring.gpg
+# Kismet built from SOURCE by APTK v1.3 (unsupported-release path).
+# apt purge cannot remove it; clean the documented install locations.
+if [[ -d /usr/local/src/kismet ]] || ls /usr/local/bin/kismet_cap_* >/dev/null 2>&1; then
+  if confirm "Remove the source-built Kismet (/usr/local/src/kismet + /usr/local/bin/kismet*)?"; then
+    rmpath /usr/local/src/kismet
+    run rm -fv /usr/local/bin/kismet* /usr/local/share/kismet* /usr/local/etc/kismet* 2>/dev/null
+    (( DRY_RUN )) || ok "source-built Kismet removed"
+  else
+    warn "kept source-built Kismet files in /usr/local"
+  fi
 fi
 # Kismet web UI credentials and state in root's home
 if [[ -d /root/.kismet ]]; then
