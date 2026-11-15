@@ -4,6 +4,7 @@ Scope & ethics — read first
 PASSIVE RECEPTION ONLY. APTK configures hardware and drives
 
 REQUIRED HARDWARE
+
 AWUS 1900 WIFI ADAPTER
 
 TECHKEY BT863 WIFI DONGLE
