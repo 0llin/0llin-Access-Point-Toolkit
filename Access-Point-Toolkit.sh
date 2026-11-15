@@ -40,6 +40,27 @@
 #     /var/log/aptk (old wardrive-console paths still cleaned by
 #     the companion uninstaller script)
 #
+# v1.3 changelog:
+#   - FIXED menu 2 on releases without packaged Kismet (Ubuntu 26.04
+#     "resolute"): base tools (curl, gnupg, ...) are installed FIRST in
+#     their own apt transaction, so a missing Kismet package can no longer
+#     abort the entire install (that is what broke the bettercap fallback
+#     with "curl: command not found")
+#   - Kismet install is now staged: if the release codename has an official
+#     Kismet apt suite (kali, buster, bullseye, bionic, focal, jammy), the
+#     repo is added with the modern signed-by keyring method; otherwise the
+#     script offers a source build from kismetwireless.net git (which
+#     includes every capture helper, e.g. kismet_cap_nrf_52840)
+#   - nrf_kismet_check() now looks for the real helper BINARY
+#     (kismet_cap_nrf_52840, underscores) or the installed apt package;
+#     the old check ran "command -v kismet-capture-nrf-52840", which is a
+#     package name, not a command
+#   - write_manifest(): fixed the cut delimiter for PRETTY_NAME
+#     (was backslash-quote, produced garbled OS name in the manifest)
+#   - GPS detection now keys on the u-blox USB vendor ID (1546) and
+#     prefers the stable /dev/serial/by-id path, instead of trusting
+#     bare ttyACM ordering (which can swap with the EBYTE dongle)
+#
 # References:
 #   Driver      : https://github.com/morrownr/8814au
 #   In-kernel   : https://lwn.net/Articles/1012242/
@@ -50,7 +71,7 @@
 set -u
 shopt -s nullglob
 
-VERSION="1.2"
+VERSION="1.3"
 
 #------------------------------------------------------------------------------
 # Paths & hardware IDs
@@ -257,6 +278,23 @@ detect_wifi_if() {
 }
 
 detect_gps_dev() {
+  # The u-blox 7 GPS also enumerates as USB CDC-ACM and shares /dev/ttyACM*
+  # with the EBYTE dongle, so trust the USB vendor ID (1546 = u-blox), not
+  # tty ordering. Prefer the stable /dev/serial/by-id path when available,
+  # mirroring detect_nrf_dev() below.
+  local t vid byid
+  for t in /sys/class/tty/ttyACM[0-9]*; do
+    [[ -f "$t/device/idVendor" ]] || continue
+    vid=$(cat "$t/device/idVendor" 2>/dev/null)
+    if [[ "$vid" == "1546" ]]; then
+      for byid in /dev/serial/by-id/*; do
+        [[ "$(readlink -f "$byid")" == "/dev/${t##*/}" ]] && { GPS_DEV="$byid"; return 0; }
+      done
+      GPS_DEV="/dev/${t##*/}"
+      return 0
+    fi
+  done
+  # Legacy fallback: first ttyACM present (pre-v1.3 behavior)
   local d
   for d in /dev/ttyACM[0-9]*; do
     [[ -e "$d" ]] && { GPS_DEV="$d"; return 0; }
@@ -287,8 +325,13 @@ detect_nrf_dev() {
 }
 
 nrf_kismet_check() {
-  # Is the Kismet helper for the nRF52840 serial sniffer installed?
-  command -v kismet-capture-nrf-52840 >/dev/null 2>&1
+  # Is the Kismet helper for the nRF52840 serial sniffer available?
+  # NOTE: the helper BINARY is kismet_cap_nrf_52840 (underscores); the
+  # hyphenated name is the apt PACKAGE. A source build installs the binary
+  # only; the apt install provides the package. Accept either.
+  command -v kismet_cap_nrf_52840 >/dev/null 2>&1 && return 0
+  dpkg-query -W -f='${Status}' kismet-capture-nrf-52840 2>/dev/null \
+    | grep -q 'install ok installed'
 }
 
 list_hci() {
@@ -336,8 +379,8 @@ fn_preflight() {
   else
     warn "EBYTE BT5040U : not detected (optional — plug in or ignore)"
   fi
-  nrf_kismet_check && ok "tool : kismet-capture-nrf-52840" \
-                       || warn "tool : kismet-capture-nrf-52840 MISSING (menu 2)"
+  nrf_kismet_check && ok "tool : kismet_cap_nrf_52840" \
+                       || warn "tool : kismet_cap_nrf_52840 MISSING (menu 2)"
   local cmd
   for cmd in kismet kismetdb_to_wiglecsv gpspipe bettercap btmgmt iw sqlite3; do
     command -v "$cmd" >/dev/null 2>&1 && ok "tool : $cmd" \
@@ -355,20 +398,56 @@ fn_preflight() {
 #==============================================================================
 # 2) Dependencies
 #==============================================================================
+# Kismet publishes official apt suites ONLY for these codenames
+# (https://www.kismetwireless.net/docs/readme/packages/). Anything newer
+# (e.g. Ubuntu noble/plucky/questing/resolute) has no suite and must be
+# built from source: https://www.kismetwireless.net/docs/readme/quickstart/
+KISMET_APT_SUITES="kali buster bullseye bionic focal jammy"
+KISMET_KEYRING="/etc/apt/keyrings/kismet-archive-keyring.gpg"
+
+os_codename() {
+  # shellcheck disable=SC1091
+  . /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-unknown}"
+}
+
 fn_install_deps() {
   banner
-  ok "Installing apt packages (this can take a few minutes)..."
+  # --- 1) Base tools FIRST, in their own apt transaction -------------------
+  # Everything else (repo keys, bettercap fallback, driver builds) depends
+  # on these. Installing them separately means a missing Kismet package can
+  # no longer abort the whole transaction like it did in v1.2.
+  ok "[1/5] Installing base tools (curl, gnupg, git, apt basics) FIRST..."
   apt-get update
   apt-get install -y \
-    kismet kismet-logtools kismet-capture-nrf-52840 \
+    curl wget ca-certificates gnupg unzip git software-properties-common \
+    usbutils iw rfkill bc sqlite3 python3 \
     gpsd gpsd-clients bluez \
-    usbutils iw rfkill bc git dkms build-essential curl unzip \
-    sqlite3 python3 \
-    "linux-headers-$(uname -r)" libelf-dev bettercap
+    dkms build-essential libelf-dev \
+    "linux-headers-$(uname -r)" \
+    || { err "Base tool install failed — check the apt output above."
+         pause_ui; return 1; }
+
+  # --- 2) universe repository ----------------------------------------------
+  ok "[2/5] Making sure the 'universe' repository is enabled..."
+  if command -v add-apt-repository >/dev/null 2>&1; then
+    add-apt-repository -y universe || warn "could not toggle universe (may already be on)"
+    apt-get update
+  fi
+
+  # --- 3) Kismet -------------------------------------------------------------
+  ok "[3/5] Installing Kismet..."
+  install_kismet || err "Kismet could not be installed — see messages above."
+
+  # --- 4) bettercap ----------------------------------------------------------
+  ok "[4/5] Installing bettercap..."
+  apt-get install -y bettercap 2>/dev/null || true
   if ! command -v bettercap >/dev/null 2>&1; then
     warn "bettercap not packaged on this release; fetching GitHub release binary..."
     install_bettercap_binary
   fi
+
+  # --- 5) WiFi driver --------------------------------------------------------
+  ok "[5/5] WiFi driver check..."
   detect_driver_state
   case "$DRIVER_MODE" in
     "rtw88_8814au (in-kernel)")
@@ -387,6 +466,103 @@ fn_install_deps() {
   esac
   ok "If a driver was installed or blacklisted, REBOOT before wardriving."
   pause_ui
+}
+
+#------------------------------------------------------------------------------
+# Kismet install, staged by what the release actually supports:
+#   a) already installed          -> nothing to do
+#   b) codename has an apt suite  -> signed-by keyring + kismetwireless repo
+#   c) anything else (26.04 ...)  -> offer a source build
+#------------------------------------------------------------------------------
+install_kismet() {
+  if command -v kismet >/dev/null 2>&1; then
+    ok "Kismet already present: $(kismet --version 2>/dev/null | head -n1)"
+    return 0
+  fi
+  local codename suite
+  codename="$(os_codename)"
+  for suite in $KISMET_APT_SUITES; do
+    if [[ "$suite" == "$codename" ]]; then
+      install_kismet_apt "$codename" && return 0
+      return 1
+    fi
+  done
+  warn "No official Kismet apt suite for '$codename'."
+  warn "Supported suites: $KISMET_APT_SUITES"
+  msg  "Ubuntu removed Kismet from its own archive years ago, and newer"
+  msg  "releases are not covered by the kismetwireless.net repo yet. The"
+  msg  "documented path for unsupported releases is a source build:"
+  msg  "  https://www.kismetwireless.net/docs/readme/quickstart/"
+  msg  "A source build also compiles EVERY capture helper into /usr/local/bin"
+  msg  "(kismet_cap_linux_wifi, kismet_cap_nrf_52840, ...)."
+  if confirm "Build Kismet from source now? (10-30 min, needs ~2 GB disk)"; then
+    kismet_source_build && return 0
+    return 1
+  fi
+  err "Kismet not installed — wardrive sessions cannot start (menu 8)."
+  return 1
+}
+
+install_kismet_apt() {
+  local codename="$1"
+  ok "Adding the official Kismet apt repo (suite '$codename')..."
+  mkdir -p /etc/apt/keyrings
+  if [[ ! -s "$KISMET_KEYRING" ]]; then
+    curl -fsSL https://www.kismetwireless.net/repos/kismet-release.gpg.key \
+      | gpg --dearmor --yes -o "$KISMET_KEYRING" \
+      || { err "Could not fetch/dearmor the Kismet signing key."; return 1; }
+    chmod 0644 "$KISMET_KEYRING"
+  fi
+  printf 'deb [signed-by=%s] https://www.kismetwireless.net/repos/apt/release/%s %s main\n' \
+    "$KISMET_KEYRING" "$codename" "$codename" > /etc/apt/sources.list.d/kismet.list
+  apt-get update || true
+  apt-get install -y kismet kismet-logtools \
+    || { err "Kismet apt install failed — check apt output above."; return 1; }
+  if apt-cache show kismet-capture-nrf-52840 >/dev/null 2>&1; then
+    apt-get install -y kismet-capture-nrf-52840
+  else
+    warn "kismet-capture-nrf-52840 is not published for this suite — the"
+    warn "EBYTE BLE sniffer source will be unavailable (WiFi capture works)."
+  fi
+  return 0
+}
+
+kismet_source_build() {
+  ok "Installing Kismet build dependencies (large list)..."
+  apt-get install -y \
+    build-essential git pkg-config zlib1g-dev \
+    libnl-3-dev libnl-genl-3-dev libcap-dev libpcap-dev libnm-dev libdw-dev \
+    libsqlite3-dev libprotobuf-dev libprotobuf-c-dev \
+    protobuf-compiler protobuf-c-compiler \
+    libusb-1.0-0-dev libwebsockets-dev \
+    python3 python3-setuptools python3-protobuf python3-requests \
+    python3-numpy python3-serial python3-usb python3-dev python3-websockets \
+    || { err "Build dependency install failed."; return 1; }
+  # Optional helpers; package names differ between releases, so best-effort.
+  local p
+  for p in libsensors4-dev libsensors-dev libubertooth-dev libbtbb-dev librtlsdr-dev; do
+    apt-get install -y "$p" >/dev/null 2>&1 || true
+  done
+  local dir="/usr/local/src/kismet"
+  if [[ -d "$dir/.git" ]]; then
+    ok "Existing Kismet checkout found — updating it..."
+    git -C "$dir" pull --ff-only || warn "git pull failed; building the current checkout."
+  else
+    ok "Cloning Kismet source (large repo, a few minutes)..."
+    git clone https://www.kismetwireless.net/git/kismet.git "$dir" \
+      || { err "git clone failed."; return 1; }
+  fi
+  ( cd "$dir" && ./configure && make -j"$(nproc)" && make suidinstall ) \
+    || { err "Kismet build failed — read the configure/make output above."
+         err "If libwebsockets caused it, retry with: cd $dir && ./configure --disable-libwebsockets && make -j\$(nproc) && make suidinstall"
+         return 1; }
+  if command -v kismet >/dev/null 2>&1; then
+    ok "Kismet built and installed (suidinstall): $(kismet --version 2>/dev/null | head -n1)"
+    ok "Capture helpers now in /usr/local/bin: kismet_cap_linux_wifi, kismet_cap_nrf_52840, ..."
+    return 0
+  fi
+  err "'make suidinstall' finished but kismet is not on PATH — check the build log."
+  return 1
 }
 
 install_bettercap_binary() {
@@ -503,8 +679,8 @@ fn_bt_menu() {
     list_hci || true
     msg "Selected BT863 controller: ${BT_HCI:-none}"
     msg "EBYTE E104-BT5040U sniffer : ${NRF_DEV:-not configured}"
-    nrf_kismet_check && ok "kismet-capture-nrf-52840 installed" \
-                       || warn "kismet-capture-nrf-52840 missing (menu 2)"
+    nrf_kismet_check && ok "kismet_cap_nrf_52840 installed" \
+                       || warn "kismet_cap_nrf_52840 missing (menu 2)"
     msg "  1) Power OFF all controllers (kills the internal/default adapter)"
     msg "  2) Select & power ON the Techkey BT863"
     msg "  3) Start BLE survey (bettercap ble.recon, BT863)"
@@ -526,7 +702,7 @@ fn_bt_menu() {
 
 fn_nrf_select() {
   if ! nrf_kismet_check; then
-    err "kismet-capture-nrf-52840 not installed — run menu 2 first"; return 1
+    err "kismet_cap_nrf_52840 not installed — run menu 2 first"; return 1
   fi
   if detect_nrf_dev; then
     ok "EBYTE E104-BT5040U found (Nordic USB VID 1915): $NRF_DEV"
@@ -560,7 +736,7 @@ fn_nrf_firmware_help() {
   msg "         -p ${NRF_DEV:-/dev/ttyACM1}"
   msg "  4. Re-plug the dongle, then run option 4 again."
   msg ""
-  msg " Verify: the kismet-capture-nrf-52840 helper prints the firmware"
+  msg " Verify: the kismet_cap_nrf_52840 helper prints the firmware"
   msg " version when it opens the device."
 }
 
@@ -749,7 +925,7 @@ EOF
   if [[ -n "$NRF_DEV" && -e "$NRF_DEV" ]]; then
     cat >> "$KISMET_SITE" <<EOF
 
-# BLE sniffer source: EBYTE E104-BT5040U (nRF52840) via kismet-capture-nrf-52840.
+# BLE sniffer source: EBYTE E104-BT5040U (nRF52840) via kismet_cap_nrf_52840.
 source=nrf52840:device=${NRF_DEV}
 EOF
   fi
@@ -788,7 +964,7 @@ write_manifest() {
     echo "session:        $SESSION_TITLE"
     echo "started_utc:    $(date -u '+%Y-%m-%d %H:%M:%S')"
     echo "host:           $(hostname)"
-    echo "os:             $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'\"' -f2)"
+    echo "os:             $(grep PRETTY_NAME /etc/os-release 2>/dev/null | cut -d'"' -f2)"
     echo "kernel:         $(uname -r)"
     echo "wifi_driver:    $DRIVER_MODE"
     echo "wifi_iface:     $WIFI_IF"
