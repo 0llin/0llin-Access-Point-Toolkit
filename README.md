@@ -5,19 +5,25 @@ PASSIVE RECEPTION ONLY. APTK configures hardware and drives
 
 REQUIRED HARDWARE
 AWUS 1900 WIFI ADAPTER
+
 TECHKEY BT863 WIFI DONGLE
+
 VFAN UG353 GPS DONGLE
+
 PC WITH UBUNTU OR DEBIAN DISTRO
 
 Kismet and bettercap to listen: it never connects to authenticates with, injects into, or decrypts any third-party network.
 
 Beacon frames and BLE advertisements are unencrypted broadcasts.
+
 ·	Wardriving law varies by country and jurisdiction — know your local rules
 
-before capturing anything.
+Before capturing anything.
+
 ·	Classroom/lab use: get written authorization from your instructor before
 
 any off-campus run.
+
 ·	Capture logs contain real-world data — other people's MAC addresses,
 
 SSIDs, and GPS coordinates. Treat them as sensitive; use the built-in
