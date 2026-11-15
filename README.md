@@ -3,11 +3,13 @@ A full-screen Bash TUI that turns a laptop into a passive Kismet-based  access-p
 Scope & ethics — read first
 PASSIVE RECEPTION ONLY. APTK configures hardware and drives
 
-Kismet and
+REQUIRED HARDWARE
+AWUS 1900 WIFI ADAPTER
+TECHKEY BT863 WIFI DONGLE
+VFAN UG353 GPS DONGLE
+PC WITH UBUNTU OR DEBIAN DISTRO
 
-bettercap to listen: it never connects to,
-
-authenticates with, injects into, or decrypts any third-party network.
+Kismet and bettercap to listen: it never connects to authenticates with, injects into, or decrypts any third-party network.
 
 Beacon frames and BLE advertisements are unencrypted broadcasts.
 ·	Wardriving law varies by country and jurisdiction — know your local rules
@@ -32,6 +34,7 @@ Other adapters may work, but auto-detection is wired to these USB IDs.
 Requirements
 ·	Ubuntu/Debian with apt and root access (the script self-elevates via sudo)
 ·	Bash 4.0+ — everything else is installed by menu option 2
+
 Quick start
 chmod +x AccessPointToolKit.sh
 sudo ./AccessPointToolKit.sh
